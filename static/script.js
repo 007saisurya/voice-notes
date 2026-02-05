@@ -1,4 +1,21 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // --- FIREBASE SETUP ---
+    const firebaseConfig = {
+        apiKey: "AIzaSyBlIkSA3IAscbFtsJA04ODzYRcPy6RcjkQ",
+        authDomain: "voice-notes-fb8d7.firebaseapp.com",
+        projectId: "voice-notes-fb8d7",
+        storageBucket: "voice-notes-fb8d7.firebasestorage.app",
+        messagingSenderId: "660364833590",
+        appId: "1:660364833590:web:1f22adf2134a12c45b7997",
+        measurementId: "G-9SM0X7Y1PF"
+    };
+
+    // Initialize Firebase
+    if (!firebase.apps.length) {
+        firebase.initializeApp(firebaseConfig);
+    }
+    const db = firebase.firestore();
+    const storage = firebase.storage();
     // DOM Elements
     const calendarDays = document.getElementById('calendarDays');
     const currentMonthYear = document.getElementById('currentMonthYear');
@@ -280,24 +297,31 @@ document.addEventListener('DOMContentLoaded', () => {
         if (STATE.audioChunks.length === 0) return;
 
         const audioBlob = new Blob(STATE.audioChunks, { type: 'audio/webm' });
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'note.webm');
-        formData.append('date', STATE.selectedDate);
-        formData.append('transcription', STATE.currentTranscript.trim());
+        const noteId = Date.now().toString(); // Simple ID generation
+        const filename = `voice_notes/${STATE.selectedDate}/${noteId}.webm`;
+        const storageRef = storage.ref().child(filename);
 
         try {
-            const response = await fetch('/api/notes', {
-                method: 'POST',
-                body: formData
-            });
-            if (response.ok) {
-                fetchNotes(STATE.selectedDate);
-            } else {
-                alert('Failed to save note.');
-            }
+            // 1. Upload Audio to Firebase Storage
+            const snapshot = await storageRef.put(audioBlob);
+            const downloadURL = await snapshot.ref.getDownloadURL();
+
+            // 2. Save Metadata to Firestore
+            const noteData = {
+                id: noteId,
+                date: STATE.selectedDate,
+                audioUrl: downloadURL,
+                storagePath: filename,
+                timestamp: new Date().toISOString(),
+                transcription: STATE.currentTranscript.trim()
+            };
+
+            await db.collection('notes').doc(noteId).set(noteData);
+            fetchNotes(STATE.selectedDate);
+
         } catch (e) {
-            console.error(e);
-            alert('Error uploading note.');
+            console.error('Upload failed:', e);
+            alert('Error uploading note. Check console for details.');
         }
     }
 
@@ -305,11 +329,22 @@ document.addEventListener('DOMContentLoaded', () => {
     async function fetchNotes(date) {
         notesList.innerHTML = '<div style="text-align:center; padding: 2rem; color: #00f3ff;"><i class="fas fa-circle-notch fa-spin fa-2x"></i></div>';
         try {
-            const res = await fetch(`/api/notes?date=${date}`);
-            const notes = await res.json();
+            const snapshot = await db.collection('notes')
+                .where('date', '==', date)
+                .get(); // Note: You might want to add .orderBy('timestamp') logic here which requires an index
+
+            const notes = [];
+            snapshot.forEach(doc => {
+                notes.push(doc.data());
+            });
+
+            // Sort manually to avoid index requirement for now
+            notes.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
             renderNotes(notes);
         } catch (e) {
-            notesList.innerHTML = '<div style="text-align:center; padding: 2rem;">Error fetching notes.</div>';
+            console.error(e);
+            notesList.innerHTML = '<div style="text-align:center; padding: 2rem;">Error fetching notes. Ensure Firestore is enabled.</div>';
         }
     }
 
@@ -339,7 +374,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                 </div>
                 <audio controls>
-                    <source src="/memories/${note.filename}" type="audio/webm">
+                    <source src="${note.audioUrl}" type="audio/webm">
                 </audio>
                 <textarea class="transcription-area" placeholder="Enter transcription...">${note.transcription || ''}</textarea>
             `;
@@ -352,24 +387,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function deleteNote(id, btn) {
-        // Removed blocking confirmation dialog to improve UX
-        // if (!confirm('Fragment deletion protocol initiated. Confirm?')) return;
-
         const originalContent = btn.innerHTML;
         btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i>';
         btn.disabled = true;
 
         try {
-            const res = await fetch(`/api/notes/${id}`, { method: 'DELETE' });
-            if (res.ok) {
-                fetchNotes(STATE.selectedDate);
-            } else {
-                btn.innerHTML = 'Error';
-                setTimeout(() => {
-                    btn.innerHTML = originalContent;
-                    btn.disabled = false;
-                }, 1500);
-            }
+            await db.collection('notes').doc(id).delete();
+            // Optional: Delete from storage using note.storagePath if you tracked it
+
+            fetchNotes(STATE.selectedDate);
         } catch (e) {
             console.error(e);
             btn.innerHTML = 'Error';
@@ -388,17 +414,14 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i>';
 
         try {
-            const res = await fetch(`/api/notes/${id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ transcription: text })
+            await db.collection('notes').doc(id).update({
+                transcription: text
             });
 
-            if (res.ok) {
-                btn.innerHTML = '<i class="fas fa-check"></i>';
-                setTimeout(() => { btn.innerHTML = originalContent; }, 1500);
-            }
+            btn.innerHTML = '<i class="fas fa-check"></i>';
+            setTimeout(() => { btn.innerHTML = originalContent; }, 1500);
         } catch (e) {
+            console.error(e);
             btn.innerHTML = 'Error';
             setTimeout(() => { btn.innerHTML = originalContent; }, 1500);
         }
